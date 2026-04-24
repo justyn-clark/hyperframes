@@ -74,9 +74,10 @@ npx hyperframes init my-video
 cd my-video
 npx hyperframes preview      # preview in browser (live reload)
 npx hyperframes render       # render to MP4
+npx hyperframes publish      # publish/share a rendered project by public URL
 ```
 
-`hyperframes init` installs skills automatically, so you can hand off to your AI agent at any point.
+`hyperframes init` installs skills automatically, so you can hand off to your AI agent at any point. Current releases also expose render-quality controls such as CRF and video bitrate overrides for production encodes.
 
 **Requirements:** Node.js >= 22, FFmpeg
 
@@ -143,6 +144,10 @@ Define your video as HTML with data attributes:
 
 Preview instantly in the browser. Render to MP4 locally or in Docker.
 
+The runtime now also supports a synchronous `seek()` API for same-origin player integrations, runtime performance metric emission, and studio/player optimizations for composition switching, scrub latency, media sync, and timeline discoverability.
+
+For higher-fidelity production output, the producer can carry HDR options through the chunk encoder, preserve native video opacity in the HDR path, and run HDR/HLG regression suites. CLI render flags for CRF and video bitrate are wired through to the encoders.
+
 ## Catalog
 
 50+ ready-to-use blocks and components — social overlays, shader transitions, data visualizations, and cinematic effects:
@@ -161,15 +166,15 @@ Full documentation at **[hyperframes.heygen.com/introduction](https://hyperframe
 
 ## Packages
 
-| Package                                                          | Description                                                 |
-| ---------------------------------------------------------------- | ----------------------------------------------------------- |
-| [`hyperframes`](packages/cli)                                    | CLI — create, preview, lint, and render compositions        |
-| [`@hyperframes/core`](packages/core)                             | Types, parsers, generators, linter, runtime, frame adapters |
-| [`@hyperframes/engine`](packages/engine)                         | Seekable page-to-video capture engine (Puppeteer + FFmpeg)  |
-| [`@hyperframes/producer`](packages/producer)                     | Full rendering pipeline (capture + encode + audio mix)      |
-| [`@hyperframes/studio`](packages/studio)                         | Browser-based composition editor UI                         |
-| [`@hyperframes/player`](packages/player)                         | Embeddable `<hyperframes-player>` web component             |
-| [`@hyperframes/shader-transitions`](packages/shader-transitions) | WebGL shader transitions for compositions                   |
+| Package                                                          | Description                                                   |
+| ---------------------------------------------------------------- | ------------------------------------------------------------- |
+| [`hyperframes`](packages/cli)                                    | CLI — create, preview, lint, render, and publish compositions |
+| [`@hyperframes/core`](packages/core)                             | Types, parsers, generators, linter, runtime, frame adapters   |
+| [`@hyperframes/engine`](packages/engine)                         | Seekable page-to-video capture engine (Puppeteer + FFmpeg)    |
+| [`@hyperframes/producer`](packages/producer)                     | Full rendering pipeline (capture + encode + audio mix)        |
+| [`@hyperframes/studio`](packages/studio)                         | Browser-based composition editor UI                           |
+| [`@hyperframes/player`](packages/player)                         | Embeddable `<hyperframes-player>` web component               |
+| [`@hyperframes/shader-transitions`](packages/shader-transitions) | WebGL shader transitions for compositions                     |
 
 ## Skills
 
