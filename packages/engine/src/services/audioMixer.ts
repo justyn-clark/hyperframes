@@ -5,12 +5,13 @@
  */
 
 import { existsSync, mkdirSync, rmSync } from "fs";
-import { join, dirname } from "path";
+import { isAbsolute, join, dirname } from "path";
 import { parseHTML } from "linkedom";
 import { extractAudioMetadata } from "../utils/ffprobe.js";
 import { downloadToTemp, isHttpUrl } from "../utils/urlDownloader.js";
 import { DEFAULT_CONFIG, type EngineConfig } from "../config.js";
 import { runFfmpeg } from "../utils/runFfmpeg.js";
+import { unwrapTemplate } from "../utils/htmlTemplate.js";
 import type { AudioElement, AudioTrack, MixResult } from "./audioMixer.types.js";
 
 export type { AudioElement, AudioTrack, MixResult } from "./audioMixer.types.js";
@@ -24,7 +25,7 @@ interface ExtractResult {
 
 export function parseAudioElements(html: string): AudioElement[] {
   const elements: AudioElement[] = [];
-  const { document } = parseHTML(html);
+  const { document } = parseHTML(unwrapTemplate(html));
 
   // Parse <audio> elements
   const audioEls = document.querySelectorAll("audio[id][src]");
@@ -324,7 +325,10 @@ export async function processCompositionAudio(
       }
       try {
         let srcPath = element.src;
-        if (!srcPath.startsWith("/") && !isHttpUrl(srcPath)) {
+        // Use isAbsolute() rather than startsWith("/"). On Windows, absolute paths
+        // like "C:\…" are not detected by the latter, so we'd re-join them under
+        // baseDir and produce duplicated, nonexistent paths.
+        if (!isAbsolute(srcPath) && !isHttpUrl(srcPath)) {
           const fromCompiled = compiledDir ? join(compiledDir, srcPath) : null;
           srcPath =
             fromCompiled && existsSync(fromCompiled) ? fromCompiled : join(baseDir, srcPath);

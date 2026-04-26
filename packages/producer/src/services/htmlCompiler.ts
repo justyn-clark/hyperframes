@@ -23,7 +23,7 @@ import {
   rewriteAssetPaths,
   rewriteCssAssetUrls,
 } from "@hyperframes/core";
-import { extractVideoMetadata, extractAudioMetadata } from "../utils/ffprobe.js";
+import { extractMediaMetadata, extractAudioMetadata } from "../utils/ffprobe.js";
 import { isPathInside, toExternalAssetKey } from "../utils/paths.js";
 import {
   parseVideoElements,
@@ -152,7 +152,7 @@ async function resolveMediaDuration(
 
   const metadata =
     tagName === "video"
-      ? await extractVideoMetadata(filePath)
+      ? await extractMediaMetadata(filePath)
       : await extractAudioMetadata(filePath);
 
   const fileDuration = metadata.durationSeconds;
@@ -196,7 +196,7 @@ async function compileHtmlFile(
   const preResolved = extractResolvedMedia(compiledHtml);
   const clampResults = await Promise.all(
     preResolved
-      .filter((el) => !!el.src)
+      .filter((el) => !!el.src && !el.loop)
       .map(async (el) => {
         const { duration: maxDuration } = await resolveMediaDuration(
           el.src!,
@@ -1033,7 +1033,7 @@ export async function compileForRender(
     if (isHttpUrl(video.src)) continue;
     const videoPath = resolve(projectDir, video.src);
     const reencode = `ffmpeg -i "${video.src}" -c:v libx264 -r 30 -g 30 -keyint_min 30 -movflags +faststart -c:a copy output.mp4`;
-    Promise.all([analyzeKeyframeIntervals(videoPath), extractVideoMetadata(videoPath)])
+    Promise.all([analyzeKeyframeIntervals(videoPath), extractMediaMetadata(videoPath)])
       .then(([analysis, metadata]) => {
         if (analysis.isProblematic) {
           console.warn(
@@ -1097,6 +1097,7 @@ export interface BrowserMediaElement {
   end: number;
   duration: number;
   mediaStart: number;
+  loop: boolean;
   hasAudio: boolean;
   volume: number;
 }
@@ -1111,6 +1112,7 @@ export async function discoverMediaFromBrowser(page: Page): Promise<BrowserMedia
       end: number;
       duration: number;
       mediaStart: number;
+      loop: boolean;
       hasAudio: boolean;
       volume: number;
     }[] = [];
@@ -1126,6 +1128,7 @@ export async function discoverMediaFromBrowser(page: Page): Promise<BrowserMedia
       const end = parseFloat(htmlEl.getAttribute("data-end") || "0");
       const duration = parseFloat(htmlEl.getAttribute("data-duration") || "0");
       const mediaStart = parseFloat(htmlEl.getAttribute("data-media-start") || "0");
+      const loop = htmlEl.hasAttribute("loop");
       const hasAudio = htmlEl.getAttribute("data-has-audio") === "true";
       const volume = parseFloat(htmlEl.getAttribute("data-volume") || "1");
 
@@ -1137,6 +1140,7 @@ export async function discoverMediaFromBrowser(page: Page): Promise<BrowserMedia
         end,
         duration,
         mediaStart,
+        loop,
         hasAudio,
         volume,
       });
@@ -1233,9 +1237,10 @@ export async function recompileWithResolutions(
   const mainImages = parseImageElements(html);
 
   // Keep inlined sub-composition media authoritative on ID collisions.
-  const videos = dedupeElementsById([...mainVideos, ...subVideos]);
-  const audios = dedupeElementsById([...mainAudios, ...subAudios]);
-  const images = dedupeElementsById([...mainImages, ...subImages]);
+  const hasSubMedia = subVideos.length > 0 || subAudios.length > 0 || subImages.length > 0;
+  const videos = hasSubMedia ? dedupeElementsById([...mainVideos, ...subVideos]) : compiled.videos;
+  const audios = hasSubMedia ? dedupeElementsById([...mainAudios, ...subAudios]) : compiled.audios;
+  const images = hasSubMedia ? dedupeElementsById([...mainImages, ...subImages]) : compiled.images;
 
   const remaining = compiled.unresolvedCompositions.filter(
     (c) => !resolutions.some((r) => r.id === c.id),

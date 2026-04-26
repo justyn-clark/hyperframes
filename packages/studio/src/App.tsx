@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect, useMemo, type ReactNode } from "react";
 import { useMountEffect } from "./hooks/useMountEffect";
 import { NLELayout } from "./components/nle/NLELayout";
+import { TimelineEditorNotice } from "./components/nle/TimelineEditorNotice";
 import { SourceEditor } from "./components/editor/SourceEditor";
 import { LeftSidebar } from "./components/sidebar/LeftSidebar";
 import { RenderQueue } from "./components/renders/RenderQueue";
@@ -12,6 +13,15 @@ import { LintModal } from "./components/LintModal";
 import type { LintFinding } from "./components/LintModal";
 import { MediaPreview } from "./components/MediaPreview";
 import { isMediaFile } from "./utils/mediaTypes";
+import {
+  buildTimelineAssetId,
+  buildTimelineAssetInsertHtml,
+  buildTimelineFileDropPlacements,
+  getTimelineAssetKind,
+  insertTimelineAssetIntoSource,
+  resolveTimelineAssetSrc,
+  type TimelineAssetKind,
+} from "./utils/timelineAssetDrop";
 import { CaptionOverlay } from "./captions/components/CaptionOverlay";
 import { CaptionPropertyPanel } from "./captions/components/CaptionPropertyPanel";
 import { CaptionTimeline } from "./captions/components/CaptionTimeline";
@@ -28,7 +38,6 @@ import {
   getTimelineZoomPercent,
 } from "./player/components/timelineZoom";
 import {
-  TIMELINE_TOGGLE_SHORTCUT_LABEL,
   getTimelineEditorHintDismissed,
   getTimelineToggleTitle,
   setTimelineEditorHintDismissed,
@@ -38,6 +47,61 @@ import {
 interface EditingFile {
   path: string;
   content: string | null;
+}
+
+interface AppToast {
+  message: string;
+  tone: "error" | "info";
+}
+
+const DEFAULT_TIMELINE_ASSET_DURATION: Record<TimelineAssetKind, number> = {
+  image: 3,
+  video: 5,
+  audio: 5,
+};
+
+function collectHtmlIds(source: string): string[] {
+  return Array.from(source.matchAll(/\bid="([^"]+)"/g), (match) => match[1] ?? "");
+}
+
+async function resolveDroppedAssetDuration(
+  projectId: string,
+  assetPath: string,
+  kind: TimelineAssetKind,
+): Promise<number> {
+  if (kind === "image") return DEFAULT_TIMELINE_ASSET_DURATION.image;
+
+  const media = document.createElement(kind === "video" ? "video" : "audio");
+  media.preload = "metadata";
+  media.src = `/api/projects/${projectId}/preview/${assetPath}`;
+
+  const duration = await new Promise<number>((resolve) => {
+    const timeout = window.setTimeout(() => resolve(DEFAULT_TIMELINE_ASSET_DURATION[kind]), 3000);
+    const finalize = (value: number) => {
+      window.clearTimeout(timeout);
+      resolve(value);
+    };
+
+    media.addEventListener(
+      "loadedmetadata",
+      () => {
+        const raw = Number(media.duration);
+        finalize(
+          Number.isFinite(raw) && raw > 0
+            ? Math.round(raw * 100) / 100
+            : DEFAULT_TIMELINE_ASSET_DURATION[kind],
+        );
+      },
+      { once: true },
+    );
+    media.addEventListener("error", () => finalize(DEFAULT_TIMELINE_ASSET_DURATION[kind]), {
+      once: true,
+    });
+  });
+
+  media.src = "";
+  media.load();
+  return duration;
 }
 
 // ── Main App ──
@@ -201,12 +265,14 @@ export function StudioApp() {
     }
   }, [captionHasSelection, captionEditMode]);
   const [globalDragOver, setGlobalDragOver] = useState(false);
-  const [uploadToast, setUploadToast] = useState<string | null>(null);
+  const [appToast, setAppToast] = useState<AppToast | null>(null);
   const [timelineVisible, setTimelineVisible] = useState(true);
   const [timelineEditorHintDismissed, setTimelineEditorHintState] = useState(
     getTimelineEditorHintDismissed,
   );
   const dragCounterRef = useRef(0);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastBlockedTimelineToastAtRef = useRef(0);
   const previewHotkeyWindowRef = useRef<Window | null>(null);
   const panelDragRef = useRef<{
     side: "left" | "right";
@@ -238,6 +304,9 @@ export function StudioApp() {
   const toggleTimelineVisibility = useCallback(() => {
     setTimelineVisible((visible) => !visible);
   }, []);
+  useMountEffect(() => () => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+  });
   const dismissTimelineEditorHint = useCallback(() => {
     setTimelineEditorHintState(true);
     setTimelineEditorHintDismissed(true);
@@ -336,13 +405,28 @@ export function StudioApp() {
 
       // Audio clips — waveform visualization
       if (el.tag === "audio") {
-        const audioUrl = el.src
-          ? el.src.startsWith("http")
-            ? el.src
-            : `/api/projects/${pid}/preview/${el.src}`
-          : "";
+        const previewBase = `/api/projects/${pid}/preview/`;
+        const previewIdx = el.src?.startsWith("http") ? el.src.indexOf(previewBase) : -1;
+        const srcRelative = el.src
+          ? previewIdx !== -1
+            ? decodeURIComponent(el.src.slice(previewIdx + previewBase.length))
+            : el.src.startsWith("http")
+              ? null
+              : el.src
+          : null;
+        const audioUrl = srcRelative
+          ? `/api/projects/${pid}/preview/${srcRelative}`
+          : (el.src ?? "");
+        const waveformUrl = srcRelative
+          ? `/api/projects/${pid}/waveform/${srcRelative}`
+          : undefined;
         return (
-          <AudioWaveform audioUrl={audioUrl} label={el.id || el.tag} labelColor={style.label} />
+          <AudioWaveform
+            audioUrl={audioUrl}
+            waveformUrl={waveformUrl}
+            label={el.id || el.tag}
+            labelColor={style.label}
+          />
         );
       }
 
@@ -380,31 +464,6 @@ export function StudioApp() {
   );
   const timelineToolbar = (
     <div className="border-b border-neutral-800/40 bg-neutral-950/96">
-      {timelineVisible && timelineElements.length > 0 && !timelineEditorHintDismissed && (
-        <div className="px-3 pt-3">
-          <div className="flex items-start justify-between gap-3 rounded-xl border border-studio-accent/20 bg-studio-accent/[0.07] px-3 py-3">
-            <div className="min-w-0">
-              <div className="text-[11px] font-semibold text-neutral-100">Timeline editor</div>
-              <p className="mt-1 text-[11px] leading-5 text-neutral-300">
-                Drag clips to move timing, and drag clip edges to resize them when handles are
-                available. Hide the panel anytime and bring it back with{" "}
-                <span className="font-mono text-[10px] text-studio-accent">
-                  {TIMELINE_TOGGLE_SHORTCUT_LABEL}
-                </span>
-                .
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={dismissTimelineEditorHint}
-              className="flex-shrink-0 rounded-md border border-neutral-700 px-2 py-1 text-[10px] font-medium text-neutral-300 transition-colors hover:border-neutral-500 hover:text-neutral-100"
-            >
-              Dismiss
-            </button>
-          </div>
-        </div>
-      )}
-
       <div className="flex items-center justify-between px-3 py-2">
         <div className="text-[10px] font-medium uppercase tracking-[0.16em] text-neutral-500">
           Timeline
@@ -732,7 +791,135 @@ export function StudioApp() {
     [activeCompPath],
   );
 
-  // ── File Management Handlers ──
+  const showToast = useCallback((message: string, tone: AppToast["tone"] = "error") => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    setAppToast({ message, tone });
+    toastTimerRef.current = setTimeout(() => setAppToast(null), 4000);
+  }, []);
+
+  const handleTimelineElementDelete = useCallback(
+    async (element: TimelineElement) => {
+      const pid = projectIdRef.current;
+      if (!pid) throw new Error("No active project");
+
+      const targetPath = element.sourceFile || activeCompPath || "index.html";
+      try {
+        const response = await fetch(
+          `/api/projects/${pid}/files/${encodeURIComponent(targetPath)}`,
+        );
+        if (!response.ok) {
+          throw new Error(`Failed to read ${targetPath}`);
+        }
+
+        const data = (await response.json()) as { content?: string };
+        const originalContent = data.content;
+        if (typeof originalContent !== "string") {
+          throw new Error(`Missing file contents for ${targetPath}`);
+        }
+
+        const patchTarget = element.domId
+          ? { id: element.domId, selector: element.selector, selectorIndex: element.selectorIndex }
+          : element.selector
+            ? { selector: element.selector, selectorIndex: element.selectorIndex }
+            : null;
+        if (!patchTarget) {
+          throw new Error(`Timeline element ${element.id} is missing a patchable target`);
+        }
+
+        const resolvedTargetPath = targetPath || "index.html";
+        const remainingElements = timelineElements.filter(
+          (timelineElement) =>
+            (timelineElement.key ?? timelineElement.id) !== (element.key ?? element.id) &&
+            (timelineElement.sourceFile || activeCompPath || "index.html") === resolvedTargetPath,
+        );
+        const trackZIndices = buildTrackZIndexMap(
+          remainingElements.map((timelineElement) => timelineElement.track),
+        );
+
+        const removeResponse = await fetch(
+          `/api/projects/${pid}/file-mutations/remove-element/${encodeURIComponent(targetPath)}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ target: patchTarget }),
+          },
+        );
+        if (!removeResponse.ok) {
+          throw new Error(`Failed to delete ${element.id} from ${targetPath}`);
+        }
+
+        const removeData = (await removeResponse.json()) as {
+          changed?: boolean;
+          content?: string;
+        };
+        let patchedContent =
+          typeof removeData.content === "string" ? removeData.content : originalContent;
+        for (const timelineElement of remainingElements) {
+          const elementTarget = timelineElement.domId
+            ? {
+                id: timelineElement.domId,
+                selector: timelineElement.selector,
+                selectorIndex: timelineElement.selectorIndex,
+              }
+            : timelineElement.selector
+              ? {
+                  selector: timelineElement.selector,
+                  selectorIndex: timelineElement.selectorIndex,
+                }
+              : null;
+          if (!elementTarget) continue;
+          const nextZIndex = trackZIndices.get(timelineElement.track);
+          if (nextZIndex == null) continue;
+          patchedContent = applyPatchByTarget(patchedContent, elementTarget, {
+            type: "inline-style",
+            property: "z-index",
+            value: String(nextZIndex),
+          });
+        }
+
+        const saveResponse = await fetch(
+          `/api/projects/${pid}/files/${encodeURIComponent(targetPath)}`,
+          {
+            method: "PUT",
+            headers: { "Content-Type": "text/plain" },
+            body: patchedContent,
+          },
+        );
+        if (!saveResponse.ok) {
+          throw new Error(`Failed to save ${targetPath}`);
+        }
+
+        if (editingPathRef.current === targetPath) {
+          setEditingFile({ path: targetPath, content: patchedContent });
+        }
+
+        usePlayerStore
+          .getState()
+          .setElements(
+            timelineElements.filter(
+              (timelineElement) =>
+                (timelineElement.key ?? timelineElement.id) !== (element.key ?? element.id),
+            ),
+          );
+        usePlayerStore.getState().setSelectedElementId(null);
+        setRefreshKey((k) => k + 1);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to delete timeline clip";
+        showToast(message);
+      }
+    },
+    [activeCompPath, showToast, timelineElements],
+  );
+
+  const handleBlockedTimelineEdit = useCallback(
+    (_element: TimelineElement) => {
+      const now = Date.now();
+      if (now - lastBlockedTimelineToastAtRef.current < 1500) return;
+      lastBlockedTimelineToastAtRef.current = now;
+      showToast("This clip can’t be moved or resized from the timeline yet.", "info");
+    },
+    [showToast],
+  );
 
   const refreshFileTree = useCallback(async () => {
     const pid = projectIdRef.current;
@@ -741,6 +928,200 @@ export function StudioApp() {
     const data = await res.json();
     if (data.files) setFileTree(data.files);
   }, []);
+
+  const uploadProjectFiles = useCallback(
+    async (files: Iterable<File>, dir?: string): Promise<string[]> => {
+      const pid = projectIdRef.current;
+      const fileList = Array.from(files);
+      if (!pid || fileList.length === 0) return [];
+
+      const formData = new FormData();
+      for (const file of fileList) {
+        formData.append("file", file);
+      }
+
+      const qs = dir ? `?dir=${encodeURIComponent(dir)}` : "";
+      try {
+        const res = await fetch(`/api/projects/${pid}/upload${qs}`, {
+          method: "POST",
+          body: formData,
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.skipped?.length) {
+            showToast(`Skipped (too large): ${data.skipped.join(", ")}`);
+          }
+          if (data.invalid?.length) {
+            const names = data.invalid.map((entry: { name: string }) => entry.name).join(", ");
+            showToast(`Unsupported media skipped: ${names}`);
+          }
+          await refreshFileTree();
+          setRefreshKey((k) => k + 1);
+          return Array.isArray(data.files) ? data.files : [];
+        } else if (res.status === 413) {
+          showToast("Upload rejected: payload too large");
+        } else {
+          showToast(`Upload failed (${res.status})`);
+        }
+      } catch {
+        showToast("Upload failed: network error");
+      }
+      return [];
+    },
+    [refreshFileTree, showToast],
+  );
+
+  const handleTimelineAssetDrop = useCallback(
+    async (
+      assetPath: string,
+      placement: Pick<TimelineElement, "start" | "track">,
+      durationOverride?: number,
+    ) => {
+      const pid = projectIdRef.current;
+      if (!pid) throw new Error("No active project");
+
+      const kind = getTimelineAssetKind(assetPath);
+      if (!kind) {
+        showToast("Only image, video, and audio assets can be dropped onto the timeline.");
+        return;
+      }
+
+      const targetPath = activeCompPath || "index.html";
+      try {
+        const response = await fetch(
+          `/api/projects/${pid}/files/${encodeURIComponent(targetPath)}`,
+        );
+        if (!response.ok) {
+          throw new Error(`Failed to read ${targetPath}`);
+        }
+
+        const data = (await response.json()) as { content?: string };
+        const originalContent = data.content;
+        if (typeof originalContent !== "string") {
+          throw new Error(`Missing file contents for ${targetPath}`);
+        }
+
+        const normalizedStart = Number(formatTimelineAttributeNumber(placement.start));
+        const duration =
+          Number.isFinite(durationOverride) && durationOverride != null && durationOverride > 0
+            ? durationOverride
+            : await resolveDroppedAssetDuration(pid, assetPath, kind);
+        const normalizedDuration = Number(formatTimelineAttributeNumber(duration));
+        const newId = buildTimelineAssetId(assetPath, collectHtmlIds(originalContent));
+        const resolvedAssetSrc = resolveTimelineAssetSrc(targetPath, assetPath);
+
+        const resolvedTargetPath = targetPath || "index.html";
+        const relevantElements = timelineElements.filter(
+          (timelineElement) =>
+            (timelineElement.sourceFile || activeCompPath || "index.html") === resolvedTargetPath,
+        );
+        const trackZIndices = buildTrackZIndexMap([
+          ...relevantElements.map((timelineElement) => timelineElement.track),
+          placement.track,
+        ]);
+
+        let patchedContent = originalContent;
+        for (const timelineElement of relevantElements) {
+          const elementTarget = timelineElement.domId
+            ? {
+                id: timelineElement.domId,
+                selector: timelineElement.selector,
+                selectorIndex: timelineElement.selectorIndex,
+              }
+            : timelineElement.selector
+              ? {
+                  selector: timelineElement.selector,
+                  selectorIndex: timelineElement.selectorIndex,
+                }
+              : null;
+          if (!elementTarget) continue;
+          const nextZIndex = trackZIndices.get(timelineElement.track);
+          if (nextZIndex == null) continue;
+          patchedContent = applyPatchByTarget(patchedContent, elementTarget, {
+            type: "inline-style",
+            property: "z-index",
+            value: String(nextZIndex),
+          });
+        }
+
+        patchedContent = insertTimelineAssetIntoSource(
+          patchedContent,
+          buildTimelineAssetInsertHtml({
+            id: newId,
+            assetPath: resolvedAssetSrc,
+            kind,
+            start: normalizedStart,
+            duration: normalizedDuration,
+            track: placement.track,
+            zIndex: trackZIndices.get(placement.track) ?? 1,
+          }),
+        );
+
+        const saveResponse = await fetch(
+          `/api/projects/${pid}/files/${encodeURIComponent(targetPath)}`,
+          {
+            method: "PUT",
+            headers: { "Content-Type": "text/plain" },
+            body: patchedContent,
+          },
+        );
+        if (!saveResponse.ok) {
+          throw new Error(`Failed to save ${targetPath}`);
+        }
+
+        if (editingPathRef.current === targetPath) {
+          setEditingFile({ path: targetPath, content: patchedContent });
+        }
+
+        setRefreshKey((k) => k + 1);
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Failed to drop asset onto timeline";
+        showToast(message);
+      }
+    },
+    [activeCompPath, showToast, timelineElements],
+  );
+
+  const handleTimelineFileDrop = useCallback(
+    async (files: File[], placement?: Pick<TimelineElement, "start" | "track">) => {
+      const pid = projectIdRef.current;
+      if (!pid) return;
+      const uploaded = await uploadProjectFiles(files);
+      if (uploaded.length === 0) return;
+      const durations: number[] = [];
+      for (const assetPath of uploaded) {
+        const kind = getTimelineAssetKind(assetPath);
+        const duration = kind ? await resolveDroppedAssetDuration(pid, assetPath, kind) : 0;
+        durations.push(Number(formatTimelineAttributeNumber(duration)));
+      }
+      const placements = buildTimelineFileDropPlacements(
+        placement ?? { start: 0, track: 0 },
+        durations,
+        timelineElements
+          .filter(
+            (timelineElement) =>
+              (timelineElement.sourceFile || activeCompPath || "index.html") ===
+              (activeCompPath || "index.html"),
+          )
+          .map((timelineElement) => ({
+            start: timelineElement.start,
+            duration: timelineElement.duration,
+            track: timelineElement.track,
+          })),
+      );
+      for (const [index, assetPath] of uploaded.entries()) {
+        await handleTimelineAssetDrop(
+          assetPath,
+          placements[index] ?? placements[0],
+          durations[index],
+        );
+      }
+    },
+    [activeCompPath, handleTimelineAssetDrop, timelineElements, uploadProjectFiles],
+  );
+
+  // ── File Management Handlers ──
 
   const handleCreateFile = useCallback(
     async (path: string) => {
@@ -855,44 +1236,11 @@ export function StudioApp() {
 
   const handleMoveFile = handleRenameFile;
 
-  const showUploadToast = useCallback((msg: string) => {
-    setUploadToast(msg);
-    setTimeout(() => setUploadToast(null), 4000);
-  }, []);
-
   const handleImportFiles = useCallback(
-    async (files: FileList, dir?: string) => {
-      const pid = projectIdRef.current;
-      if (!pid || files.length === 0) return;
-
-      const formData = new FormData();
-      for (const file of Array.from(files)) {
-        formData.append("file", file);
-      }
-
-      const qs = dir ? `?dir=${encodeURIComponent(dir)}` : "";
-      try {
-        const res = await fetch(`/api/projects/${pid}/upload${qs}`, {
-          method: "POST",
-          body: formData,
-        });
-        if (res.ok) {
-          const data = await res.json();
-          if (data.skipped?.length) {
-            showUploadToast(`Skipped (too large): ${data.skipped.join(", ")}`);
-          }
-          await refreshFileTree();
-          setRefreshKey((k) => k + 1);
-        } else if (res.status === 413) {
-          showUploadToast("Upload rejected: payload too large");
-        } else {
-          showUploadToast(`Upload failed (${res.status})`);
-        }
-      } catch {
-        showUploadToast("Upload failed: network error");
-      }
+    async (files: FileList | File[], dir?: string) => {
+      void uploadProjectFiles(Array.from(files), dir);
     },
-    [refreshFileTree, showUploadToast],
+    [uploadProjectFiles],
   );
 
   const handleLint = useCallback(async () => {
@@ -1155,8 +1503,12 @@ export function StudioApp() {
             activeCompositionPath={activeCompPath}
             timelineToolbar={timelineToolbar}
             renderClipContent={renderClipContent}
+            onDeleteElement={handleTimelineElementDelete}
+            onAssetDrop={handleTimelineAssetDrop}
+            onFileDrop={handleTimelineFileDrop}
             onMoveElement={handleTimelineElementMove}
             onResizeElement={handleTimelineElementResize}
+            onBlockedEditAttempt={handleBlockedTimelineEdit}
             onCompIdToSrcChange={setCompIdToSrc}
             onCompositionChange={(compPath) => {
               // Sync activeCompPath when user drills down via timeline double-click
@@ -1267,6 +1619,12 @@ export function StudioApp() {
         )}
       </div>
 
+      {timelineElements.length > 0 && !timelineEditorHintDismissed && (
+        <div className="pointer-events-none absolute bottom-5 left-5 z-[140]">
+          <TimelineEditorNotice onDismiss={dismissTimelineEditorHint} />
+        </div>
+      )}
+
       {/* Lint modal */}
       {lintModal !== null && projectId && (
         <LintModal findings={lintModal} projectId={projectId} onClose={() => setLintModal(null)} />
@@ -1306,9 +1664,15 @@ export function StudioApp() {
           </div>
         </div>
       )}
-      {uploadToast && (
-        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-[91] px-4 py-2 rounded-lg bg-red-900/90 border border-red-700/50 text-sm text-red-200 shadow-lg animate-in fade-in slide-in-from-bottom-2">
-          {uploadToast}
+      {appToast && (
+        <div
+          className={`absolute bottom-6 left-1/2 -translate-x-1/2 z-[91] px-4 py-2 rounded-lg border text-sm shadow-lg animate-in fade-in slide-in-from-bottom-2 ${
+            appToast.tone === "error"
+              ? "bg-red-900/90 border-red-700/50 text-red-200"
+              : "bg-neutral-900/95 border-neutral-700/60 text-neutral-100"
+          }`}
+        >
+          {appToast.message}
         </div>
       )}
     </div>

@@ -2,6 +2,7 @@ import { useState, useCallback, useRef, useEffect, memo, type ReactNode } from "
 import { useMountEffect } from "../../hooks/useMountEffect";
 import { useTimelinePlayer, PlayerControls, Timeline, usePlayerStore } from "../../player";
 import type { TimelineElement } from "../../player";
+import type { BlockedTimelineEditIntent } from "../../player/components/timelineEditing";
 import { NLEPreview } from "./NLEPreview";
 import { CompositionBreadcrumb, type CompositionLevel } from "./CompositionBreadcrumb";
 
@@ -27,6 +28,15 @@ interface NLELayoutProps {
     element: TimelineElement,
     style: { clip: string; label: string },
   ) => ReactNode;
+  onFileDrop?: (
+    files: File[],
+    placement?: Pick<TimelineElement, "start" | "track">,
+  ) => Promise<void> | void;
+  onDeleteElement?: (element: TimelineElement) => Promise<void> | void;
+  onAssetDrop?: (
+    assetPath: string,
+    placement: Pick<TimelineElement, "start" | "track">,
+  ) => Promise<void> | void;
   /** Persist timeline move actions back into source HTML */
   onMoveElement?: (
     element: TimelineElement,
@@ -36,6 +46,7 @@ interface NLELayoutProps {
     element: TimelineElement,
     updates: Pick<TimelineElement, "start" | "duration" | "playbackStart">,
   ) => Promise<void> | void;
+  onBlockedEditAttempt?: (element: TimelineElement, intent: BlockedTimelineEditIntent) => void;
   /** Exposes the compIdToSrc map for parent components (e.g., useRenderClipContent) */
   onCompIdToSrcChange?: (map: Map<string, string>) => void;
   /** Whether the timeline panel is visible (default: true) */
@@ -59,8 +70,12 @@ export const NLELayout = memo(function NLELayout({
   onIframeRef,
   onCompositionChange,
   renderClipContent,
+  onFileDrop,
+  onDeleteElement,
+  onAssetDrop,
   onMoveElement,
   onResizeElement,
+  onBlockedEditAttempt,
   onCompIdToSrcChange,
   timelineVisible,
   onToggleTimeline,
@@ -377,7 +392,8 @@ export const NLELayout = memo(function NLELayout({
           <div className="flex flex-col flex-shrink-0" style={{ height: timelineH }}>
             {/* Timeline tracks */}
             <div
-              className="flex-1 min-h-0 overflow-hidden bg-neutral-950"
+              // flex-col: toolbar takes natural height, Timeline fills remainder.
+              className="flex flex-col flex-1 min-h-0 overflow-hidden bg-neutral-950"
               onDoubleClick={(e) => {
                 if ((e.target as HTMLElement).closest("[data-clip]")) return;
                 if (compositionStack.length > 1) {
@@ -385,13 +401,17 @@ export const NLELayout = memo(function NLELayout({
                 }
               }}
             >
-              {timelineToolbar}
+              <div className="flex-shrink-0">{timelineToolbar}</div>
               <Timeline
                 onSeek={seek}
                 onDrillDown={handleDrillDown}
                 renderClipContent={renderClipContent}
+                onFileDrop={onFileDrop}
+                onDeleteElement={onDeleteElement}
+                onAssetDrop={onAssetDrop}
                 onMoveElement={onMoveElement}
                 onResizeElement={onResizeElement}
+                onBlockedEditAttempt={onBlockedEditAttempt}
               />
             </div>
             {timelineFooter && <div className="flex-shrink-0">{timelineFooter}</div>}

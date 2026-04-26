@@ -70,6 +70,7 @@
             "group": "Guides",
             "pages": [
               "guides/website-to-video",
+              "guides/claude-design",
               "guides/prompting",
               "guides/hyperframes-vs-remotion",
               "guides/gsap-animation",
@@ -194,6 +195,7 @@
             "group": "Contributing",
             "pages": [
               "contributing",
+              "contributing/release-channels",
               "contributing/testing-local-changes"
             ]
           }

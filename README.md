@@ -33,11 +33,16 @@ npx skills add heygen-com/hyperframes
 
 This teaches your agent (Claude Code, Cursor, Gemini CLI, Codex) how to write correct compositions and GSAP animations. In Claude Code, the skills register as slash commands — invoke `/hyperframes` to author compositions, `/hyperframes-cli` for CLI commands, and `/gsap` for animation help.
 
+For Claude Design, open [`docs/guides/claude-design-hyperframes.md`](https://github.com/heygen-com/hyperframes/blob/main/docs/guides/claude-design-hyperframes.md) on GitHub and click the download button (↓) to save it, then attach the file to your Claude Design chat. It produces a valid first draft; refine in any AI coding agent. See the [Claude Design guide](https://hyperframes.heygen.com/guides/claude-design).
+
 For Codex specifically, the same skills are also exposed as an [OpenAI Codex plugin](./.codex-plugin/plugin.json) — sparse-install just the plugin surface:
 
 ```bash
 codex plugin marketplace add heygen-com/hyperframes --sparse .codex-plugin --sparse skills --sparse assets
 ```
+
+For Claude Code, the repo also ships a [Claude Code plugin manifest](./.claude-plugin/plugin.json): test it locally with `claude --plugin-dir .`. The manifest intentionally omits `skills` because Claude Code auto-discovers the root `skills/` directory by convention, and for marketplace submission use the title `HyperFrames by HeyGen` plus the black/white icon assets at [`assets/claude-code-icon-dark.svg`](./assets/claude-code-icon-dark.svg) and [`assets/claude-code-icon-light.svg`](./assets/claude-code-icon-light.svg) for the two theme slots.
+For Cursor, the same skills are packaged as a [Cursor plugin](./.cursor-plugin/plugin.json) — install from the Cursor Marketplace, or sideload by cloning this repo and pointing **Settings → Plugins → Load unpacked** at the repo root.
 
 #### Try it: example prompts
 

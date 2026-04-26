@@ -17,7 +17,7 @@ import process from "node:process";
 import { createRenderJob, executeRenderJob } from "./services/renderOrchestrator.js";
 import { compileForRender } from "./services/htmlCompiler.js";
 import { validateCompilation } from "./services/compilationTester.js";
-import { extractVideoMetadata } from "./utils/ffprobe.js";
+import { extractMediaMetadata } from "./utils/ffprobe.js";
 import { buildRmsEnvelope, compareAudioEnvelopes } from "./utils/audioRegression.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -233,6 +233,14 @@ function discoverTestSuites(
   }
 
   return suites;
+}
+
+function copyFixtureSupportFiles(suite: TestSuite, tempRoot: string): void {
+  const excluded = new Set(["src", "output", "meta.json", "failures"]);
+  for (const entry of readdirSync(suite.dir)) {
+    if (excluded.has(entry)) continue;
+    cpSync(join(suite.dir, entry), join(tempRoot, entry), { recursive: true });
+  }
 }
 
 // ── FFmpeg Utilities ─────────────────────────────────────────────────────────
@@ -582,6 +590,7 @@ async function runTestSuite(
     logPretty("Rendering video...", "🎬");
 
     const tempSrcDir = join(tempRoot, "src");
+    copyFixtureSupportFiles(suite, tempRoot);
     cpSync(suite.srcDir, tempSrcDir, { recursive: true });
 
     const job = createRenderJob({
@@ -625,7 +634,7 @@ async function runTestSuite(
 
     // Visual comparison (100 frames, 1 per 1% of video duration)
     logPretty("Comparing visual quality (100 checkpoints)...", "🔍");
-    const videoMetadata = await extractVideoMetadata(renderedOutputPath);
+    const videoMetadata = await extractMediaMetadata(renderedOutputPath);
     const videoDuration = videoMetadata.durationSeconds;
 
     const visualCheckpoints: Array<{ time: number; psnr: number; passed: boolean }> = [];

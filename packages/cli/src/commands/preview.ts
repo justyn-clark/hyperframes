@@ -318,14 +318,30 @@ async function runEmbeddedMode(
   projectName?: string,
   forceNew = false,
 ): Promise<void> {
-  const { createStudioServer } = await import("../server/studioServer.js");
+  const { createStudioServer, resolveStudioBundle } = await import("../server/studioServer.js");
 
   const pName = projectName ?? basename(dir);
-  const { app } = createStudioServer({ projectDir: dir, projectName: pName });
+  const studioBundle = resolveStudioBundle();
 
   clack.intro(c.bold("hyperframes preview"));
   const s = clack.spinner();
   s.start("Starting studio...");
+
+  if (!studioBundle.available) {
+    s.stop(c.error("Studio build missing"));
+    console.error();
+    console.error(`  ${c.dim("Could not find")} ${c.accent("index.html")} ${c.dim("in:")}`);
+    for (const checkedPath of studioBundle.checkedPaths) {
+      console.error(`  ${c.dim("-")} ${checkedPath}`);
+    }
+    console.error();
+    console.error(`  ${c.dim("Rebuild the CLI package with")} ${c.accent("pnpm run build")}`);
+    console.error();
+    process.exitCode = 1;
+    return;
+  }
+
+  const { app } = createStudioServer({ projectDir: dir, projectName: pName });
 
   let result: FindPortResult;
   try {
@@ -371,7 +387,47 @@ async function runEmbeddedMode(
   console.log();
   import("open").then((mod) => mod.default(`${url}#project/${pName}`)).catch(() => {});
 
-  // Block until the process is killed. Ctrl+C (SIGINT) uses Node's default
-  // behavior — exit immediately. The OS reclaims the port and file handles.
-  return new Promise<void>(() => {});
+  // Block until Ctrl+C. Node would normally exit on SIGINT, but the listening
+  // HTTP server keeps handles open, so the event loop stays alive after the
+  // signal handler fires. Close the server explicitly and resolve the promise
+  // so `run()` returns cleanly instead of requiring a second Ctrl+C (or,
+  // worse, the user force-killing the terminal).
+  //
+  // Windows wrinkle: Ctrl+C in some terminals (Git Bash / MSYS) doesn't reach
+  // Node as a SIGINT at all — the process just sits there. Run a readline
+  // interface on stdin so the keystroke is observed at the TTY layer and
+  // re-emit it as SIGINT. No-op on platforms where the signal already arrives.
+  let rl: import("node:readline").Interface | undefined;
+  if (process.platform === "win32") {
+    const readline = await import("node:readline");
+    rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    rl.on("SIGINT", () => {
+      process.emit("SIGINT", "SIGINT");
+    });
+  }
+
+  return new Promise<void>((resolveRun) => {
+    let shuttingDown = false;
+    const shutdown = (): void => {
+      if (shuttingDown) return;
+      shuttingDown = true;
+      process.off("SIGINT", shutdown);
+      process.off("SIGTERM", shutdown);
+      // Close the readline interface so a second Ctrl+C during the grace
+      // period below doesn't re-emit SIGINT and trigger Node's default
+      // exit-130 behaviour, contradicting our intent to exit cleanly.
+      rl?.close();
+      // `server.close()` can take a second or two to drain keep-alive
+      // connections; surface progress so the terminal doesn't look frozen.
+      console.log();
+      console.log(`  ${c.dim("Shutting down studio...")}`);
+      result.server.close(() => resolveRun());
+      // If close() hangs on an open connection, force exit after a short
+      // grace period. Exit 0 because user-initiated Ctrl+C isn't an error
+      // — a non-zero code makes pnpm / npm print ELIFECYCLE.
+      setTimeout(() => process.exit(0), 2000).unref();
+    };
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
+  });
 }

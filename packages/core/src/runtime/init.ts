@@ -368,12 +368,16 @@ export function initSandboxRuntimeModular(): void {
     return resolver.resolveStartForElement(element, fallback);
   };
 
-  const resolveDurationForElement = (element: Element): number | null => {
+  const resolveDurationForElement = (
+    element: Element,
+    opts?: { includeAuthoredTimingAttrs?: boolean },
+  ): number | null => {
     const resolver = createRuntimeStartTimeResolver({
       timelineRegistry: (window.__timelines ?? {}) as Record<
         string,
         RuntimeTimelineLike | undefined
       >,
+      includeAuthoredTimingAttrs: opts?.includeAuthoredTimingAttrs ?? true,
     });
     return resolver.resolveDurationForElement(element);
   };
@@ -1195,8 +1199,49 @@ export function initSandboxRuntimeModular(): void {
   };
 
   const syncMediaForCurrentState = () => {
+    const resolveMediaCompositionContext = (element: HTMLVideoElement | HTMLAudioElement) => {
+      const compositionRoot = element.closest("[data-composition-id]");
+      const inheritedStart = compositionRoot ? resolveStartForElement(compositionRoot, 0) : null;
+      // Media sync intentionally uses the authored host window here instead of
+      // the live child timeline duration. Visibility prefers live truth so a
+      // shrinking child composition hides early, but nested media needs a
+      // stable authored window so seeks clamp against the host clip timing.
+      const inheritedDuration = compositionRoot
+        ? resolveDurationForElement(compositionRoot, { includeAuthoredTimingAttrs: true })
+        : null;
+      return { compositionRoot, inheritedStart, inheritedDuration };
+    };
     const cache = refreshRuntimeMediaCache({
-      resolveStartSeconds: (element) => resolveStartForElement(element, 0),
+      shouldIncludeElement: (element) =>
+        element.hasAttribute("data-start") ||
+        Boolean(resolveMediaCompositionContext(element).compositionRoot),
+      resolveStartSeconds: (element) => {
+        const context = resolveMediaCompositionContext(
+          element as HTMLVideoElement | HTMLAudioElement,
+        );
+        return resolveStartForElement(element, context.inheritedStart ?? 0);
+      },
+      resolveDurationSeconds: (element) => {
+        const context = resolveMediaCompositionContext(element);
+        const start = resolveStartForElement(element, context.inheritedStart ?? 0);
+        const mediaStart =
+          Number.parseFloat(element.dataset.playbackStart ?? element.dataset.mediaStart ?? "0") ||
+          0;
+        const hostRemaining =
+          context.inheritedStart != null &&
+          context.inheritedDuration != null &&
+          context.inheritedDuration > 0
+            ? Math.max(0, context.inheritedStart + context.inheritedDuration - start)
+            : null;
+        const sourceDuration =
+          Number.isFinite(element.duration) && element.duration > mediaStart
+            ? Math.max(0, element.duration - mediaStart)
+            : null;
+        if (sourceDuration != null && hostRemaining != null) {
+          return Math.min(sourceDuration, hostRemaining);
+        }
+        return sourceDuration ?? hostRemaining;
+      },
     });
     syncRuntimeMedia({
       clips: cache.mediaClips,
@@ -1233,18 +1278,28 @@ export function initSandboxRuntimeModular(): void {
       }
 
       const start = resolveStartForElement(rawNode, 0);
-      const duration = resolveDurationForElement(rawNode);
-      const end = duration != null && duration > 0 ? start + duration : Number.POSITIVE_INFINITY;
-      // For composition hosts, use the composition timeline's duration to compute end
-      let computedEnd = end;
+      let duration = resolveDurationForElement(rawNode);
       const compId = rawNode.getAttribute("data-composition-id");
-      if (compId && !Number.isFinite(end)) {
+      if (compId) {
         const compTimeline = (window.__timelines ?? {})[compId];
+        let liveDuration: number | null = null;
         if (compTimeline && typeof compTimeline.duration === "function") {
-          const compDur = compTimeline.duration();
-          if (compDur > 0) computedEnd = start + compDur;
+          const compDur = Number(compTimeline.duration());
+          if (Number.isFinite(compDur) && compDur > 0) {
+            liveDuration = compDur;
+          }
+        }
+
+        // Composition hosts must respect both the authored clip window in the parent
+        // composition and the child composition's own live timeline duration.
+        if (duration != null && duration > 0 && liveDuration != null) {
+          duration = Math.min(duration, liveDuration);
+        } else if ((duration == null || duration <= 0) && liveDuration != null) {
+          duration = liveDuration;
         }
       }
+      const computedEnd =
+        duration != null && duration > 0 ? start + duration : Number.POSITIVE_INFINITY;
       const isVisibleNow =
         state.currentTime >= start &&
         (Number.isFinite(computedEnd) ? state.currentTime < computedEnd : true);
